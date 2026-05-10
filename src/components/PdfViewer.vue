@@ -32,7 +32,7 @@ import { useEditorStore } from '../stores/editorStore'
 import { usePdfLoader } from '../composables/usePdfLoader'
 
 const props = defineProps({ images: { type: Array, default: () => [] } })
-const emit = defineEmits(['images-added'])
+const emit = defineEmits(['images-added', 'selection-change'])
 
 const store = useEditorStore()
 const { renderPage } = usePdfLoader()
@@ -42,10 +42,9 @@ const layerRef = ref(null)
 const transformerRef = ref(null)
 const selectedId = ref(null)
 const konvaImages = ref([])
+const renderError = ref(null)
 
 const imageElCache = new Map()
-
-const renderError = ref(null)
 
 const stageConfig = computed(() => ({
   width: store.canvasSize.width,
@@ -70,12 +69,25 @@ const transformerConfig = {
   anchorSize: 10,
 }
 
-// 元件掛載後立刻渲染當前頁（此時 pdfDoc 已存在）
+// 通知父層選取狀態
+watch(selectedId, (id) => emit('selection-change', id))
+
+// 掛載後渲染第一頁 + 綁定鍵盤
 onMounted(async () => {
-  await doRenderPage(store.currentPage)
+  window.addEventListener('keydown', onKeyDown)
+  try {
+    await doRenderPage(store.currentPage)
+  } catch (e) {
+    renderError.value = e.message
+  }
 })
 
-// 切頁時重新渲染
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeyDown)
+  imageElCache.clear()
+})
+
+// 切頁
 watch(() => store.currentPage, async (page) => {
   selectedId.value = null
   konvaImages.value = []
@@ -85,11 +97,17 @@ watch(() => store.currentPage, async (page) => {
 // 父層傳入新圖片
 watch(() => props.images, async (newImgs) => {
   if (!newImgs.length) return
-  for (const { src } of newImgs) {
-    await addImageToKonva(src)
+  try {
+    for (const { src } of newImgs) {
+      await addImageToKonva(src)
+    }
+  } catch (e) {
+    console.error('addImageToKonva error:', e)
   }
   emit('images-added')
 }, { deep: true })
+
+// ── 渲染 ──────────────────────────────────────────
 
 async function doRenderPage(page) {
   renderError.value = null
@@ -108,13 +126,17 @@ async function doRenderPage(page) {
 function loadPageImages() {
   konvaImages.value = []
   selectedId.value = null
+  detachTransformer()
   const saved = store.imagesByPage[store.currentPage] ?? []
+  store.initPageHistory(store.currentPage, saved)
   saved.forEach(img => {
     loadImageEl(img.src, (el) => {
       konvaImages.value.push(makeKonvaEntry(img.id, el, img.x, img.y, img.width, img.height, img.rotation ?? 0))
     })
   })
 }
+
+// ── 圖片新增 ─────────────────────────────────────
 
 function addImageToKonva(src) {
   return new Promise(resolve => {
@@ -128,36 +150,86 @@ function addImageToKonva(src) {
       const y = (store.canvasSize.height - h) / 2
       konvaImages.value.push(makeKonvaEntry(id, el, x, y, w, h, 0))
       saveCurrentImages()
-      nextTick(() => attachTransformer(id))
       resolve()
     })
   })
 }
 
-function makeKonvaEntry(id, el, x, y, width, height, rotation) {
-  return {
-    id,
-    config: {
-      image: el,
-      x, y, width, height, rotation,
-      draggable: true,
-      name: id,
-    }
+// ── 快照 / 儲存 ──────────────────────────────────
+
+function getSnapshot() {
+  return konvaImages.value.map(img => ({
+    id: img.id,
+    src: img.config.image.src,
+    x: img.config.x,
+    y: img.config.y,
+    width: img.config.width,
+    height: img.config.height,
+    rotation: img.config.rotation ?? 0,
+  }))
+}
+
+function syncToStore(images) {
+  store.savePageImages(store.currentPage, images)
+}
+
+function saveCurrentImages() {
+  const snapshot = getSnapshot()
+  syncToStore(snapshot)
+  store.pushHistory(store.currentPage, snapshot)
+}
+
+// ── 還原快照（不推 history）────────────────────────
+
+function applySnapshot(images) {
+  konvaImages.value = []
+  selectedId.value = null
+  detachTransformer()
+  images.forEach(img => {
+    loadImageEl(img.src, (el) => {
+      konvaImages.value.push(makeKonvaEntry(img.id, el, img.x, img.y, img.width, img.height, img.rotation ?? 0))
+    })
+  })
+  syncToStore(images)
+}
+
+// ── Undo / Redo / Delete ─────────────────────────
+
+function handleUndo() {
+  const images = store.undo(store.currentPage)
+  if (images !== null) applySnapshot(images)
+}
+
+function handleRedo() {
+  const images = store.redo(store.currentPage)
+  if (images !== null) applySnapshot(images)
+}
+
+function deleteSelected() {
+  if (!selectedId.value) return
+  konvaImages.value = konvaImages.value.filter(i => i.id !== selectedId.value)
+  selectedId.value = null
+  detachTransformer()
+  saveCurrentImages()
+}
+
+// ── 鍵盤快捷鍵 ──────────────────────────────────
+
+function onKeyDown(e) {
+  const ctrl = e.ctrlKey || e.metaKey
+  if (ctrl && !e.shiftKey && e.key === 'z') {
+    e.preventDefault()
+    handleUndo()
+  } else if (ctrl && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+    e.preventDefault()
+    handleRedo()
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId.value) {
+    e.preventDefault()
+    deleteSelected()
   }
 }
 
-function loadImageEl(src, callback) {
-  if (imageElCache.has(src)) {
-    callback(imageElCache.get(src))
-    return
-  }
-  const el = new window.Image()
-  el.onload = () => {
-    imageElCache.set(src, el)
-    callback(el)
-  }
-  el.src = src
-}
+// ── Konva 事件 ───────────────────────────────────
 
 function onImageMouseDown(id) {
   selectedId.value = id
@@ -167,13 +239,32 @@ function onImageMouseDown(id) {
 function onStageMouseDown(e) {
   if (e.target === e.target.getStage()) {
     selectedId.value = null
-    const tr = transformerRef.value?.getNode()
-    if (tr) {
-      tr.nodes([])
-      tr.getLayer()?.batchDraw()
-    }
+    detachTransformer()
   }
 }
+
+function onDragEnd(id, e) {
+  const node = e.target
+  updateConfig(id, { x: node.x(), y: node.y() })
+  saveCurrentImages()
+}
+
+function onTransformEnd(id, e) {
+  const node = e.target
+  updateConfig(id, {
+    x: node.x(),
+    y: node.y(),
+    width: Math.max(10, node.width() * node.scaleX()),
+    height: Math.max(10, node.height() * node.scaleY()),
+    rotation: node.rotation(),
+  })
+  node.scaleX(1)
+  node.scaleY(1)
+  layerRef.value?.getNode()?.batchDraw()
+  saveCurrentImages()
+}
+
+// ── Transformer ──────────────────────────────────
 
 function attachTransformer(id) {
   const tr = transformerRef.value?.getNode()
@@ -187,27 +278,28 @@ function attachTransformer(id) {
   }
 }
 
-function onDragEnd(id, e) {
-  const node = e.target
-  updateConfig(id, { x: node.x(), y: node.y() })
-  saveCurrentImages()
+function detachTransformer() {
+  const tr = transformerRef.value?.getNode()
+  if (tr) {
+    tr.nodes([])
+    tr.getLayer()?.batchDraw()
+  }
 }
 
-function onTransformEnd(id, e) {
-  const node = e.target
-  const scaleX = node.scaleX()
-  const scaleY = node.scaleY()
-  updateConfig(id, {
-    x: node.x(),
-    y: node.y(),
-    width: Math.max(10, node.width() * scaleX),
-    height: Math.max(10, node.height() * scaleY),
-    rotation: node.rotation(),
-  })
-  node.scaleX(1)
-  node.scaleY(1)
-  layerRef.value?.getNode()?.batchDraw()
-  saveCurrentImages()
+// ── 工具函數 ─────────────────────────────────────
+
+function makeKonvaEntry(id, el, x, y, width, height, rotation) {
+  return {
+    id,
+    config: { image: el, x, y, width, height, rotation, draggable: true, name: id },
+  }
+}
+
+function loadImageEl(src, callback) {
+  if (imageElCache.has(src)) { callback(imageElCache.get(src)); return }
+  const el = new window.Image()
+  el.onload = () => { imageElCache.set(src, el); callback(el) }
+  el.src = src
 }
 
 function updateConfig(id, patch) {
@@ -215,25 +307,16 @@ function updateConfig(id, patch) {
   if (img) Object.assign(img.config, patch)
 }
 
-function saveCurrentImages() {
-  store.savePageImages(store.currentPage, konvaImages.value.map(img => ({
-    id: img.id,
-    src: img.config.image.src,
-    x: img.config.x,
-    y: img.config.y,
-    width: img.config.width,
-    height: img.config.height,
-    rotation: img.config.rotation ?? 0,
-  })))
-}
+// ── 暴露給父層（工具列按鈕呼叫）─────────────────
 
-onUnmounted(() => imageElCache.clear())
+defineExpose({ undo: handleUndo, redo: handleRedo, deleteSelected })
 </script>
 
 <style scoped>
 .viewer-wrapper {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   padding: 24px;
   overflow: auto;
   flex: 1;
@@ -245,18 +328,12 @@ onUnmounted(() => imageElCache.clear())
   border-radius: 4px;
   flex-shrink: 0;
 }
+.pdf-canvas { display: block; }
+.konva-stage { position: absolute; top: 0; left: 0; }
 .render-error {
   color: #ff6b6b;
   padding: 12px;
   font-size: 13px;
   text-align: center;
-}
-.pdf-canvas {
-  display: block;
-}
-.konva-stage {
-  position: absolute;
-  top: 0;
-  left: 0;
 }
 </style>
