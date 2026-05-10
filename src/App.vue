@@ -3,12 +3,41 @@
     <header class="toolbar">
       <div class="brand">📝 PDF 編輯器</div>
       <div class="actions">
-        <label class="pdf-btn">
+        <label class="action-btn pdf-upload-btn">
           📄 上傳 PDF
           <input type="file" accept="application/pdf" hidden @change="onPdfSelected" />
         </label>
-        <ImageUploader v-if="store.pdfBytes" @images-selected="onImagesSelected" />
-        <DownloadButton v-if="store.pdfBytes" />
+
+        <template v-if="store.pdfBytes">
+          <ImageUploader @images-selected="onImagesSelected" />
+
+          <div class="divider" />
+
+          <button
+            class="action-btn undo-btn"
+            :disabled="!store.canUndoCurrentPage"
+            title="復原 (Ctrl+Z)"
+            @click="viewerRef?.undo()"
+          >↩ 復原</button>
+
+          <button
+            class="action-btn undo-btn"
+            :disabled="!store.canRedoCurrentPage"
+            title="取消復原 (Ctrl+Y)"
+            @click="viewerRef?.redo()"
+          >↪ 重做</button>
+
+          <button
+            class="action-btn delete-btn"
+            :disabled="!hasSelection"
+            title="刪除選取圖片 (Delete)"
+            @click="viewerRef?.deleteSelected()"
+          >🗑️ 刪除</button>
+
+          <div class="divider" />
+
+          <DownloadButton />
+        </template>
       </div>
     </header>
 
@@ -20,7 +49,12 @@
       </template>
 
       <template v-else>
-        <PdfViewer :images="pendingImages" @images-added="pendingImages = []" />
+        <PdfViewer
+          ref="viewerRef"
+          :images="pendingImages"
+          @images-added="pendingImages = []"
+          @selection-change="onSelectionChange"
+        />
       </template>
 
       <div v-if="loadError" class="error">{{ loadError }}</div>
@@ -45,7 +79,9 @@ import DownloadButton from './components/DownloadButton.vue'
 const store = useEditorStore()
 const { loadPdf: loadPdfFile, error: loadError } = usePdfLoader()
 
+const viewerRef = ref(null)
 const pendingImages = ref([])
+const hasSelection = ref(false)
 
 async function onPdfSelected(e) {
   const file = e.target.files[0]
@@ -59,6 +95,10 @@ async function loadPdf(file) {
 
 function onImagesSelected(images) {
   pendingImages.value = images
+}
+
+function onSelectionChange(id) {
+  hasSelection.value = !!id
 }
 
 function changePage(page) {
@@ -77,43 +117,81 @@ function changePage(page) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 24px;
+  padding: 10px 20px;
   background: #16213e;
   border-bottom: 1px solid #2a3a5e;
   position: sticky;
   top: 0;
   z-index: 100;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .brand {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: #c8d6ff;
-  letter-spacing: 0.5px;
 }
 
 .actions {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
-.pdf-btn {
+.divider {
+  width: 1px;
+  height: 28px;
+  background: #2a3a5e;
+  margin: 0 4px;
+}
+
+.action-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: rgba(74, 108, 247, 0.2);
-  color: #c8d6ff;
-  border: 1px solid #4a6cf7;
-  border-radius: 8px;
-  padding: 10px 20px;
-  font-size: 14px;
+  gap: 5px;
+  border-radius: 7px;
+  padding: 8px 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
+  border: none;
 }
-.pdf-btn:hover {
+
+.pdf-upload-btn {
+  background: rgba(74, 108, 247, 0.2);
+  color: #c8d6ff;
+  border: 1px solid #4a6cf7 !important;
+  cursor: pointer;
+}
+.pdf-upload-btn:hover {
   background: rgba(74, 108, 247, 0.4);
+}
+
+.undo-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: #c8d6ff;
+}
+.undo-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+}
+.undo-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.delete-btn {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+.delete-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.3);
+}
+.delete-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .main {
